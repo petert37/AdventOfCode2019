@@ -1,11 +1,14 @@
 package util
 
+import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.channels.SendChannel
+import java.io.File
 import kotlin.math.pow
 
 private typealias Parameter = Pair<ParameterMode, Int>
 private typealias Program = MutableList<Int>
 
-private enum class Opcode(val opcode: Int, val parameterCount: Int) {
+enum class Opcode(val opcode: Int, val parameterCount: Int) {
     Add(1, 3),
     Multiply(2, 3),
     Input(3, 1),
@@ -22,7 +25,7 @@ private enum class Opcode(val opcode: Int, val parameterCount: Int) {
     }
 }
 
-private enum class ParameterMode(val code: Int) {
+enum class ParameterMode(val code: Int) {
     Position(0),
     Immediate(1);
 
@@ -32,14 +35,15 @@ private enum class ParameterMode(val code: Int) {
     }
 }
 
-class IntcodeComputer(private val program: List<Int>, private val debug: Boolean = false) {
+open class IntcodeComputer(protected val program: List<Int>, protected val debug: Boolean = false) {
 
-    fun run(): List<Int> {
+    suspend fun run(): List<Int> {
         val program = this.program.toMutableList()
         var pc = 0
         while (true) {
             val opcode = Opcode.fromOpcode(program[pc] % 100) ?: throw Exception("Unknown opcode")
             if (opcode == Opcode.Halt) {
+                beforeHalt()
                 break
             }
             val params = program.subList(pc + 1, pc + opcode.parameterCount + 1).mapIndexed { i, value ->
@@ -52,7 +56,7 @@ class IntcodeComputer(private val program: List<Int>, private val debug: Boolean
         return program.toList()
     }
 
-    private fun executeInstruction(pc: Int, program: Program, opcode: Opcode, params: List<Parameter>): Int {
+    suspend fun executeInstruction(pc: Int, program: Program, opcode: Opcode, params: List<Parameter>): Int {
 
         if (debug) {
             println("INSTRUCTION: ${opcode.name}($params)")
@@ -94,7 +98,7 @@ class IntcodeComputer(private val program: List<Int>, private val debug: Boolean
         return pc + opcode.parameterCount + 1
     }
 
-    protected fun readInput(): Int {
+    protected open suspend fun readInput(): Int {
         var input: String? = null
         while (input == null) {
             print("INPUT: ")
@@ -113,8 +117,15 @@ class IntcodeComputer(private val program: List<Int>, private val debug: Boolean
         throw Exception("Should not happen")
     }
 
-    protected fun writeOutput(output: Int) {
+    protected open suspend fun writeOutput(output: Int) {
         println("OUTPUT: $output")
+    }
+
+    protected open fun beforeHalt() {
+    }
+
+    companion object {
+        fun readProgram(path: String) = File(path).readText().split(",").map { it.toInt() }
     }
 
 }
@@ -128,4 +139,31 @@ private fun Program.setParameterValue(parameter: Parameter, value: Int) {
     if (parameter.first == ParameterMode.Immediate)
         throw Exception("Write parameters cannot be in immediate mode")
     this[parameter.second] = value
+}
+
+class AsyncIntcodeComputer(
+    program: List<Int>,
+    private val input: ReceiveChannel<Int>,
+    private val output: SendChannel<Int>,
+    debug: Boolean = false
+) : IntcodeComputer(program, debug) {
+
+    override suspend fun readInput(): Int {
+        val value = input.receive()
+        if (debug) {
+            println("Read input: $value")
+        }
+        return value
+    }
+
+    override suspend fun writeOutput(output: Int) {
+        if (debug) {
+            println("Writing output: $output")
+        }
+        this.output.send(output)
+    }
+
+    override fun beforeHalt() {
+        output.close()
+    }
 }
