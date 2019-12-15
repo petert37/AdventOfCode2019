@@ -5,8 +5,8 @@ import kotlinx.coroutines.channels.SendChannel
 import java.io.File
 import kotlin.math.pow
 
-private typealias Parameter = Pair<ParameterMode, Int>
-private typealias Program = MutableList<Int>
+private typealias Parameter = Pair<ParameterMode, Long>
+private typealias Program = MutableList<Long>
 
 enum class Opcode(val opcode: Int, val parameterCount: Int) {
     Add(1, 3),
@@ -17,6 +17,7 @@ enum class Opcode(val opcode: Int, val parameterCount: Int) {
     JumpIfFalse(6, 2),
     LessThan(7, 3),
     Equals(8, 3),
+    RelativeBaseOffset(9, 1),
     Halt(99, 0);
 
     companion object {
@@ -27,7 +28,8 @@ enum class Opcode(val opcode: Int, val parameterCount: Int) {
 
 enum class ParameterMode(val code: Int) {
     Position(0),
-    Immediate(1);
+    Immediate(1),
+    Relative(2);
 
     companion object {
         private val map = values().associateBy(ParameterMode::code)
@@ -35,70 +37,76 @@ enum class ParameterMode(val code: Int) {
     }
 }
 
-open class IntcodeComputer(protected val program: List<Int>, protected val debug: Boolean = false) {
+open class IntcodeComputer(protected val program: List<Long>, protected val debug: Boolean = false) {
 
-    suspend fun run(): List<Int> {
-        val program = this.program.toMutableList()
-        var pc = 0
+    protected var pc = 0
+    protected var relativeBase = 0L
+    protected var activeProgram = program.toMutableList()
+
+    suspend fun run(): List<Long> {
+        activeProgram = program.toMutableList()
+        pc = 0
+        relativeBase = 0
         while (true) {
-            val opcode = Opcode.fromOpcode(program[pc] % 100) ?: throw Exception("Unknown opcode")
+            val opcode = Opcode.fromOpcode((activeProgram[pc] % 100).toInt()) ?: throw Exception("Unknown opcode")
             if (opcode == Opcode.Halt) {
                 beforeHalt()
                 break
             }
-            val params = program.subList(pc + 1, pc + opcode.parameterCount + 1).mapIndexed { i, value ->
-                val mode = ParameterMode.fromCode(program[pc] / 10.0.pow(i + 2).toInt() % 10)
+            val params = activeProgram.subList(pc + 1, pc + opcode.parameterCount + 1).mapIndexed { i, value ->
+                val mode = ParameterMode.fromCode((activeProgram[pc] / 10.0.pow(i + 2).toLong() % 10).toInt())
                     ?: throw Exception("Unknown parameter mode")
                 mode to value
             }
-            pc = executeInstruction(pc, program, opcode, params)
+            pc = executeInstruction(opcode, params)
         }
-        return program.toList()
+        return activeProgram.toList()
     }
 
-    suspend fun executeInstruction(pc: Int, program: Program, opcode: Opcode, params: List<Parameter>): Int {
+    suspend fun executeInstruction(opcode: Opcode, params: List<Parameter>): Int {
 
         if (debug) {
             println("INSTRUCTION: ${opcode.name}($params)")
         }
 
         when (opcode) {
-            Opcode.Add -> program.setParameterValue(
-                params[2],
-                program.getParameterValue(params[0]) + program.getParameterValue(params[1])
+            Opcode.Add -> setParameterValue(
+                params[2], getParameterValue(params[0]) + getParameterValue(params[1])
             )
-            Opcode.Multiply -> program.setParameterValue(
-                params[2],
-                program.getParameterValue(params[0]) * program.getParameterValue(params[1])
+            Opcode.Multiply -> setParameterValue(
+                params[2], getParameterValue(params[0]) * getParameterValue(params[1])
             )
-            Opcode.Input -> program.setParameterValue(params[0], readInput())
-            Opcode.Output -> writeOutput(program.getParameterValue(params[0]))
+            Opcode.Input -> setParameterValue(params[0], readInput())
+            Opcode.Output -> writeOutput(getParameterValue(params[0]))
             Opcode.JumpIfTrue -> {
-                if (program.getParameterValue(params[0]) != 0)
-                    return program.getParameterValue(params[1])
+                if (getParameterValue(params[0]) != 0L)
+                    return getParameterValue(params[1]).toInt()
             }
             Opcode.JumpIfFalse -> {
-                if (program.getParameterValue(params[0]) == 0)
-                    return program.getParameterValue(params[1])
+                if (getParameterValue(params[0]) == 0L)
+                    return getParameterValue(params[1]).toInt()
             }
             Opcode.LessThan -> {
-                if (program.getParameterValue(params[0]) < program.getParameterValue(params[1]))
-                    program.setParameterValue(params[2], 1)
+                if (getParameterValue(params[0]) < getParameterValue(params[1]))
+                    setParameterValue(params[2], 1)
                 else
-                    program.setParameterValue(params[2], 0)
+                    setParameterValue(params[2], 0)
             }
             Opcode.Equals -> {
-                if (program.getParameterValue(params[0]) == program.getParameterValue(params[1]))
-                    program.setParameterValue(params[2], 1)
+                if (getParameterValue(params[0]) == getParameterValue(params[1]))
+                    setParameterValue(params[2], 1)
                 else
-                    program.setParameterValue(params[2], 0)
+                    setParameterValue(params[2], 0)
+            }
+            Opcode.RelativeBaseOffset -> {
+                relativeBase += getParameterValue(params[0])
             }
             Opcode.Halt -> throw Error("Cannot execute Halt instruction")
         }
         return pc + opcode.parameterCount + 1
     }
 
-    protected open suspend fun readInput(): Int {
+    protected open suspend fun readInput(): Long {
         var input: String? = null
         while (input == null) {
             print("INPUT: ")
@@ -107,7 +115,7 @@ open class IntcodeComputer(protected val program: List<Int>, protected val debug
                 println("You must provide an input!")
             } else {
                 try {
-                    return input.toInt()
+                    return input.toLong()
                 } catch (e: Exception) {
                     println("You must provide a number!")
                     input = null
@@ -117,38 +125,56 @@ open class IntcodeComputer(protected val program: List<Int>, protected val debug
         throw Exception("Should not happen")
     }
 
-    protected open suspend fun writeOutput(output: Int) {
+    protected open suspend fun writeOutput(output: Long) {
         println("OUTPUT: $output")
     }
 
     protected open fun beforeHalt() {
     }
 
+    private fun getParameterValue(parameter: Parameter) = when (parameter.first) {
+        ParameterMode.Immediate -> parameter.second
+        ParameterMode.Position -> getProgramPosition(parameter.second)
+        ParameterMode.Relative -> getProgramPosition(relativeBase + parameter.second)
+    }
+
+    private fun setParameterValue(parameter: Parameter, value: Long) = when (parameter.first) {
+        ParameterMode.Immediate -> throw Exception("Write parameters cannot be in immediate mode")
+        ParameterMode.Position -> setProgramPosition(parameter.second, value)
+        ParameterMode.Relative -> setProgramPosition(relativeBase + parameter.second, value)
+    }
+
+    private fun getProgramPosition(index: Long): Long {
+        if (index > Int.MAX_VALUE) throw Exception("Index too big")
+        expandActiveProgram((index + 1).toInt())
+        return activeProgram[index.toInt()]
+    }
+
+    private fun setProgramPosition(index: Long, value: Long) {
+        if (index > Int.MAX_VALUE) throw Exception("Index too big")
+        expandActiveProgram((index + 1).toInt())
+        activeProgram[index.toInt()] = value
+    }
+
+    private fun expandActiveProgram(size: Int) {
+        if (activeProgram.size >= size) return
+        activeProgram.addAll(List(size - activeProgram.size) { 0L })
+    }
+
     companion object {
-        fun readProgram(path: String) = File(path).readText().split(",").map { it.toInt() }
+        fun readProgram(path: String) = File(path).readText().split(",").map { it.toLong() }
     }
 
 }
 
-private fun Program.getParameterValue(parameter: Parameter) = when (parameter.first) {
-    ParameterMode.Immediate -> parameter.second
-    ParameterMode.Position -> this[parameter.second]
-}
-
-private fun Program.setParameterValue(parameter: Parameter, value: Int) {
-    if (parameter.first == ParameterMode.Immediate)
-        throw Exception("Write parameters cannot be in immediate mode")
-    this[parameter.second] = value
-}
-
 class AsyncIntcodeComputer(
-    program: List<Int>,
-    private val input: ReceiveChannel<Int>,
-    private val output: SendChannel<Int>,
+    program: List<Long>,
+    private val input: ReceiveChannel<Long>,
+    private val output: SendChannel<Long>,
     debug: Boolean = false
 ) : IntcodeComputer(program, debug) {
 
-    override suspend fun readInput(): Int {
+    override suspend fun readInput(): Long {
         val value = input.receive()
         if (debug) {
             println("Read input: $value")
@@ -156,7 +182,7 @@ class AsyncIntcodeComputer(
         return value
     }
 
-    override suspend fun writeOutput(output: Int) {
+    override suspend fun writeOutput(output: Long) {
         if (debug) {
             println("Writing output: $output")
         }

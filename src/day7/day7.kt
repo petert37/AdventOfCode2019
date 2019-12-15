@@ -9,19 +9,19 @@ import util.permutations.Permutations
 
 fun main() = runBlocking {
     val input = IntcodeComputer.readProgram("src/day7/input.txt")
-    var max = Int.MIN_VALUE
+    var max = Long.MIN_VALUE
 
     Permutations(5).forEach { permutation ->
 
-        val inChannel = Channel<Int>(1)
+        val inChannel = Channel<Long>(1)
 
         var outChannel = inChannel
 
         runBlocking {
             permutation.forEach { phase ->
-                val newOutChannel = Channel<Int>(1)
+                val newOutChannel = Channel<Long>(1)
                 val computer = AsyncIntcodeComputer(input, outChannel, newOutChannel)
-                outChannel.send(phase)
+                outChannel.send(phase.toLong())
                 outChannel = newOutChannel
                 async { computer.run() }
             }
@@ -35,20 +35,20 @@ fun main() = runBlocking {
     }
     println("Largest output: $max")
 
-    max = Int.MIN_VALUE
+    max = Long.MIN_VALUE
 
     Permutations(5, 5).forEach { permutation ->
 
-        val inChannel = Channel<Int>(1)
+        val inChannel = Channel<Long>(1)
 
         var outChannel = inChannel
 
         runBlocking {
 
             permutation.forEach { phase ->
-                val newOutChannel = Channel<Int>(1)
+                val newOutChannel = Channel<Long>(1)
                 val computer = AsyncIntcodeComputer(input, outChannel, newOutChannel)
-                outChannel.send(phase)
+                outChannel.send(phase.toLong())
                 outChannel = newOutChannel
                 async { computer.run() }
             }
