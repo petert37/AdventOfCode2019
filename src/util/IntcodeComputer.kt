@@ -171,10 +171,12 @@ class AsyncIntcodeComputer(
     program: List<Long>,
     private val input: ReceiveChannel<Long>,
     private val output: SendChannel<Long>,
-    debug: Boolean = false
+    debug: Boolean = false,
+    private val beforeInput: (suspend () -> Unit)? = null
 ) : IntcodeComputer(program, debug) {
 
     override suspend fun readInput(): Long {
+        beforeInput?.invoke()
         val value = input.receive()
         if (debug) {
             println("Read input: $value")
