@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+tokio = { version = "1.36.0", features = ["full"] }
 
 [lib]
 name = "intcode"
@@ -12,3 +13,7 @@ path = "src/lib/intcode/intcode.rs"
 [[bin]]
 name = "day-02"
 path = "src/bin/day-02/main.rs"
+
+[[bin]]
+name = "day-05"
+path = "src/bin/day-05/main.rs"
