@@ -99,3 +99,28 @@ impl StringComputerOutput {
         self.output.clone()
     }
 }
+
+pub struct LoggingConnector {
+    output: Sender<i64>,
+    input: Receiver<i64>,
+    log: String,
+}
+
+impl LoggingConnector {
+    pub fn new(output: Sender<i64>, input: Receiver<i64>) -> Self {
+        LoggingConnector {
+            output,
+            input,
+            log: String::new(),
+        }
+    }
+
+    pub async fn run(&mut self) -> String {
+        while let Some(data) = self.input.recv().await {
+            self.log.push_str(&data.to_string());
+            self.log.push('\n');
+            let _ = self.output.send(data).await;
+        }
+        self.log.clone()
+    }
+}
