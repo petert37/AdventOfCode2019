@@ -5,19 +5,14 @@ use crate::computer_io::{StringComputerInput, StringComputerOutput};
 pub struct IntcodeComputer {
     memory: Vec<i64>,
     instruction_pointer: usize,
+    relative_base: i64,
     input: Option<Receiver<i64>>,
     output: Option<Sender<i64>>,
 }
 
 impl IntcodeComputer {
     pub fn new(input: &str) -> IntcodeComputer {
-        let memory = IntcodeComputer::parse_memory(input);
-        IntcodeComputer {
-            memory,
-            instruction_pointer: 0,
-            input: None,
-            output: None,
-        }
+        IntcodeComputer::new_internal(input, None, None)
     }
 
     pub fn new_with_io(
@@ -25,12 +20,21 @@ impl IntcodeComputer {
         computer_input: Receiver<i64>,
         computer_output: Sender<i64>,
     ) -> Self {
+        IntcodeComputer::new_internal(input, Some(computer_input), Some(computer_output))
+    }
+
+    fn new_internal(
+        input: &str,
+        computer_input: Option<Receiver<i64>>,
+        computer_output: Option<Sender<i64>>,
+    ) -> Self {
         let memory = IntcodeComputer::parse_memory(input);
         IntcodeComputer {
             memory,
             instruction_pointer: 0,
-            input: Some(computer_input),
-            output: Some(computer_output),
+            relative_base: 0,
+            input: computer_input,
+            output: computer_output,
         }
     }
 
@@ -70,13 +74,13 @@ impl IntcodeComputer {
     async fn execute_instruction(&mut self, instruction: &Instruction) {
         match instruction {
             Instruction::Add { lhs, rhs, dst } => {
-                let result = lhs.get_value(&self.memory) + rhs.get_value(&self.memory);
-                self.set_memory(dst.get_dst_address(), result);
+                let result = lhs.get_value(self) + rhs.get_value(self);
+                self.set_memory(dst.get_dst_address(self.relative_base), result);
                 self.move_instruction_pointer(4);
             }
             Instruction::Multiply { lhs, rhs, dst } => {
-                let result = lhs.get_value(&self.memory) * rhs.get_value(&self.memory);
-                self.set_memory(dst.get_dst_address(), result);
+                let result = lhs.get_value(self) * rhs.get_value(self);
+                self.set_memory(dst.get_dst_address(self.relative_base), result);
                 self.move_instruction_pointer(4);
             }
             Instruction::Halt => (),
@@ -88,11 +92,11 @@ impl IntcodeComputer {
                     .recv()
                     .await
                     .expect("Failed to read input");
-                self.set_memory(dst.get_dst_address(), read_data);
+                self.set_memory(dst.get_dst_address(self.relative_base), read_data);
                 self.move_instruction_pointer(2);
             }
             Instruction::Output { src } => {
-                let output_data = src.get_value(&self.memory);
+                let output_data = src.get_value(self);
                 self.output
                     .as_mut()
                     .expect("Output channel not set")
@@ -105,8 +109,8 @@ impl IntcodeComputer {
                 condition,
                 jump_address,
             } => {
-                if condition.get_value(&self.memory) != 0 {
-                    self.instruction_pointer = jump_address.get_value(&self.memory) as usize;
+                if condition.get_value(self) != 0 {
+                    self.instruction_pointer = jump_address.get_value(self) as usize;
                 } else {
                     self.move_instruction_pointer(3);
                 }
@@ -115,29 +119,33 @@ impl IntcodeComputer {
                 condition,
                 jump_address,
             } => {
-                if condition.get_value(&self.memory) == 0 {
-                    self.instruction_pointer = jump_address.get_value(&self.memory) as usize;
+                if condition.get_value(self) == 0 {
+                    self.instruction_pointer = jump_address.get_value(self) as usize;
                 } else {
                     self.move_instruction_pointer(3);
                 }
             }
             Instruction::LessThan { lhs, rhs, dst } => {
-                let result = if lhs.get_value(&self.memory) < rhs.get_value(&self.memory) {
+                let result = if lhs.get_value(self) < rhs.get_value(self) {
                     1
                 } else {
                     0
                 };
-                self.set_memory(dst.get_dst_address(), result);
+                self.set_memory(dst.get_dst_address(self.relative_base), result);
                 self.move_instruction_pointer(4);
             }
             Instruction::Equals { lhs, rhs, dst } => {
-                let result = if lhs.get_value(&self.memory) == rhs.get_value(&self.memory) {
+                let result = if lhs.get_value(self) == rhs.get_value(self) {
                     1
                 } else {
                     0
                 };
-                self.set_memory(dst.get_dst_address(), result);
+                self.set_memory(dst.get_dst_address(self.relative_base), result);
                 self.move_instruction_pointer(4);
+            }
+            Instruction::RelativeBaseOffset { offset } => {
+                self.relative_base += offset.get_value(self);
+                self.move_instruction_pointer(2);
             }
         }
     }
@@ -199,6 +207,9 @@ enum Instruction {
         rhs: Parameter,
         dst: Parameter,
     },
+    RelativeBaseOffset {
+        offset: Parameter,
+    },
 }
 
 impl Instruction {
@@ -241,6 +252,9 @@ impl Instruction {
                 rhs: Parameter::from_memory(memory, address, 1),
                 dst: Parameter::from_memory(memory, address, 2),
             },
+            9 => Instruction::RelativeBaseOffset {
+                offset: Parameter::from_memory(memory, address, 0),
+            },
             _ => panic!("Invalid opcode: {}", opcode),
         }
     }
@@ -249,6 +263,7 @@ impl Instruction {
 enum ParamtereMode {
     Position,
     Immediate,
+    Relative,
 }
 
 impl ParamtereMode {
@@ -257,6 +272,7 @@ impl ParamtereMode {
         match (value / divisor) % 10 {
             0 => ParamtereMode::Position,
             1 => ParamtereMode::Immediate,
+            2 => ParamtereMode::Relative,
             _ => panic!("Invalid parameter mode: {} {}", value, parameter_index),
         }
     }
@@ -275,17 +291,21 @@ impl Parameter {
         }
     }
 
-    fn get_value(&self, memory: &[i64]) -> i64 {
+    fn get_value(&self, computer: &IntcodeComputer) -> i64 {
         match self.mode {
-            ParamtereMode::Position => memory[self.value as usize],
+            ParamtereMode::Position => computer.get_memory(self.value as usize),
             ParamtereMode::Immediate => self.value,
+            ParamtereMode::Relative => {
+                computer.get_memory((self.value + computer.relative_base) as usize)
+            }
         }
     }
 
-    fn get_dst_address(&self) -> usize {
+    fn get_dst_address(&self, relative_base: i64) -> usize {
         match self.mode {
             ParamtereMode::Position => self.value as usize,
             ParamtereMode::Immediate => panic!("Immediate mode not supported for destination"),
+            ParamtereMode::Relative => (self.value + relative_base) as usize,
         }
     }
 }
