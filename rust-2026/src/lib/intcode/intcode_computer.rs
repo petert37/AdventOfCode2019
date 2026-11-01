@@ -1,13 +1,35 @@
+use tokio::sync::mpsc::{self, Receiver, Sender};
+
+use crate::{
+    computer_io::{StringInput, StringOutput},
+    input::parse_input,
+};
+
 pub struct Computer {
-    program_counter: u64,
+    instruction_pointer: u64,
     memory: Vec<i64>,
+    input: Receiver<i64>,
+    output: Sender<i64>,
 }
 
 impl Computer {
     pub fn new() -> Self {
+        let (_, input) = mpsc::channel(32);
+        let (output, _) = mpsc::channel(32);
         Computer {
-            program_counter: 0,
+            instruction_pointer: 0,
             memory: vec![],
+            input,
+            output,
+        }
+    }
+
+    pub fn new_with_io(input: Receiver<i64>, output: Sender<i64>) -> Self {
+        Computer {
+            instruction_pointer: 0,
+            memory: vec![],
+            input,
+            output,
         }
     }
 
@@ -19,56 +41,52 @@ impl Computer {
         &self.memory
     }
 
-    pub fn run(&mut self) {
+    pub fn get_memory_value(&self, address: u64) -> i64 {
+        self.memory[address as usize]
+    }
+
+    pub fn set_memory_value(&mut self, address: u64, value: i64) {
+        if address >= self.memory.len() as u64 {
+            self.memory.resize((address + 1) as usize, 0);
+        }
+        self.memory[address as usize] = value;
+    }
+
+    pub async fn run(&mut self) {
         loop {
             let instruction = self.get_instruction();
             if matches!(instruction, Instruction::Halt) {
                 break;
             }
-            instruction.execute(self);
+            instruction.execute(self).await;
         }
     }
 
-    fn get_pointer_address(&self, address: u64) -> u64 {
-        let pointer_address = self.memory[address as usize];
-        if pointer_address < 0 {
-            panic!(
-                "Invalid pointer address at {}: {}",
-                address, pointer_address
-            );
+    fn move_instruction_pointer(&mut self, amount: i64) {
+        let new_value = self.instruction_pointer as i64 + amount;
+        if new_value < 0 {
+            panic!("Instruction pointer cannot be negative")
         }
-        pointer_address as u64
+        self.instruction_pointer = new_value as u64;
     }
 
-    fn get_pointer_value(&self, address: u64) -> i64 {
-        self.memory[address as usize]
-    }
-
-    fn set_pointer_value(&mut self, address: u64, value: i64) {
-        self.memory[address as usize] = value;
-    }
-
-    fn move_program_counter(&mut self, amount: u64) {
-        self.program_counter += amount;
+    fn set_instruction_pointer(&mut self, value: i64) {
+        if value < 0 {
+            panic!("Instruction pointer cannot be negative")
+        }
+        self.instruction_pointer = value as u64;
     }
 
     fn get_instruction(&self) -> Instruction {
-        let address = self.program_counter as usize;
-        let opcode = self.memory[address];
-        match opcode {
-            1 => Instruction::Add {
-                operand_1_address: self.get_pointer_address(self.program_counter + 1),
-                operand_2_address: self.get_pointer_address(self.program_counter + 2),
-                output_address: self.get_pointer_address(self.program_counter + 3),
-            },
-            2 => Instruction::Multiply {
-                operand_1_address: self.get_pointer_address(self.program_counter + 1),
-                operand_2_address: self.get_pointer_address(self.program_counter + 2),
-                output_address: self.get_pointer_address(self.program_counter + 3),
-            },
-            99 => Instruction::Halt,
-            _ => panic!("Invalid instruction at {}: {}", address, opcode),
-        }
+        Instruction::parse(&self.memory, self.instruction_pointer)
+    }
+
+    async fn read_input(&mut self) -> i64 {
+        self.input.recv().await.unwrap()
+    }
+
+    async fn write_output(&self, value: i64) {
+        self.output.send(value).await.unwrap()
     }
 }
 
@@ -80,42 +98,226 @@ impl Default for Computer {
 
 enum Instruction {
     Add {
-        operand_1_address: u64,
-        operand_2_address: u64,
-        output_address: u64,
+        lhs: Parameter,
+        rhs: Parameter,
+        dst: Parameter,
     },
     Multiply {
-        operand_1_address: u64,
-        operand_2_address: u64,
-        output_address: u64,
+        lhs: Parameter,
+        rhs: Parameter,
+        dst: Parameter,
+    },
+    Input {
+        dst: Parameter,
+    },
+    Output {
+        src: Parameter,
+    },
+    JumpIfTrue {
+        test_value: Parameter,
+        jump_target: Parameter,
+    },
+    JumpIfFalse {
+        test_value: Parameter,
+        jump_target: Parameter,
+    },
+    LessThan {
+        lhs: Parameter,
+        rhs: Parameter,
+        dst: Parameter,
+    },
+    Equals {
+        lhs: Parameter,
+        rhs: Parameter,
+        dst: Parameter,
     },
     Halt,
 }
 
 impl Instruction {
-    fn execute(&self, computer: &mut Computer) {
+    fn parse(memory: &[i64], address: u64) -> Self {
+        let address = address as usize;
+        let instruction = memory[address];
+        let opcode = instruction % 100;
+        match opcode {
+            1 => Instruction::Add {
+                lhs: Parameter::parse(instruction, memory[address + 1], 0),
+                rhs: Parameter::parse(instruction, memory[address + 2], 1),
+                dst: Parameter::parse(instruction, memory[address + 3], 2),
+            },
+            2 => Instruction::Multiply {
+                lhs: Parameter::parse(instruction, memory[address + 1], 0),
+                rhs: Parameter::parse(instruction, memory[address + 2], 1),
+                dst: Parameter::parse(instruction, memory[address + 3], 2),
+            },
+            3 => Instruction::Input {
+                dst: Parameter::parse(instruction, memory[address + 1], 0),
+            },
+            4 => Instruction::Output {
+                src: Parameter::parse(instruction, memory[address + 1], 0),
+            },
+            5 => Instruction::JumpIfTrue {
+                test_value: Parameter::parse(instruction, memory[address + 1], 0),
+                jump_target: Parameter::parse(instruction, memory[address + 2], 1),
+            },
+            6 => Instruction::JumpIfFalse {
+                test_value: Parameter::parse(instruction, memory[address + 1], 0),
+                jump_target: Parameter::parse(instruction, memory[address + 2], 1),
+            },
+            7 => Instruction::LessThan {
+                lhs: Parameter::parse(instruction, memory[address + 1], 0),
+                rhs: Parameter::parse(instruction, memory[address + 2], 1),
+                dst: Parameter::parse(instruction, memory[address + 3], 2),
+            },
+            8 => Instruction::Equals {
+                lhs: Parameter::parse(instruction, memory[address + 1], 0),
+                rhs: Parameter::parse(instruction, memory[address + 2], 1),
+                dst: Parameter::parse(instruction, memory[address + 3], 2),
+            },
+            99 => Instruction::Halt,
+            _ => panic!(
+                "Invalid instruction at {}: {} - {}",
+                address, instruction, opcode
+            ),
+        }
+    }
+
+    async fn execute(&self, computer: &mut Computer) {
         match self {
-            Instruction::Add {
-                operand_1_address,
-                operand_2_address,
-                output_address,
-            } => {
-                let result = computer.get_pointer_value(*operand_1_address)
-                    + computer.get_pointer_value(*operand_2_address);
-                computer.set_pointer_value(*output_address, result);
-                computer.move_program_counter(4);
+            Instruction::Add { lhs, rhs, dst } => {
+                let result = lhs.get_value(computer) + rhs.get_value(computer);
+                dst.set_value(computer, result);
+                computer.move_instruction_pointer(4);
             }
-            Instruction::Multiply {
-                operand_1_address,
-                operand_2_address,
-                output_address,
+            Instruction::Multiply { lhs, rhs, dst } => {
+                let result = lhs.get_value(computer) * rhs.get_value(computer);
+                dst.set_value(computer, result);
+                computer.move_instruction_pointer(4);
+            }
+            Instruction::Input { dst } => {
+                let input = computer.read_input().await;
+                dst.set_value(computer, input);
+                computer.move_instruction_pointer(2);
+            }
+            Instruction::Output { src } => {
+                let value = src.get_value(computer);
+                computer.write_output(value).await;
+                computer.move_instruction_pointer(2);
+            }
+            Instruction::JumpIfTrue {
+                test_value,
+                jump_target,
             } => {
-                let result = computer.get_pointer_value(*operand_1_address)
-                    * computer.get_pointer_value(*operand_2_address);
-                computer.set_pointer_value(*output_address, result);
-                computer.move_program_counter(4);
+                let value = test_value.get_value(computer);
+                if value != 0 {
+                    let target = jump_target.get_value(computer);
+                    computer.set_instruction_pointer(target);
+                } else {
+                    computer.move_instruction_pointer(3);
+                }
+            }
+            Instruction::JumpIfFalse {
+                test_value,
+                jump_target,
+            } => {
+                let value = test_value.get_value(computer);
+                if value == 0 {
+                    let target = jump_target.get_value(computer);
+                    computer.set_instruction_pointer(target);
+                } else {
+                    computer.move_instruction_pointer(3);
+                }
+            }
+            Instruction::LessThan { lhs, rhs, dst } => {
+                let value = if lhs.get_value(computer) < rhs.get_value(computer) {
+                    1
+                } else {
+                    0
+                };
+                dst.set_value(computer, value);
+                computer.move_instruction_pointer(4);
+            }
+            Instruction::Equals { lhs, rhs, dst } => {
+                let value = if lhs.get_value(computer) == rhs.get_value(computer) {
+                    1
+                } else {
+                    0
+                };
+                dst.set_value(computer, value);
+                computer.move_instruction_pointer(4);
             }
             Instruction::Halt => panic!("Cannot execute Halt instruction"),
         }
     }
+}
+
+enum ParameterMode {
+    Position,
+    Immediate,
+}
+
+struct Parameter {
+    mode: ParameterMode,
+    value: i64,
+}
+
+impl Parameter {
+    fn parse(instruction: i64, value: i64, index: u32) -> Self {
+        let mode_value = (instruction / 10_i64.pow(index + 2)) % 10;
+        let mode = match mode_value {
+            0 => ParameterMode::Position,
+            1 => ParameterMode::Immediate,
+            _ => panic!(
+                "Invalid parameter mode: instruction: {}, index: {}, mode: {}",
+                instruction, index, mode_value
+            ),
+        };
+        Parameter { mode, value }
+    }
+
+    fn get_value(&self, computer: &Computer) -> i64 {
+        match self.mode {
+            ParameterMode::Immediate => self.value,
+            ParameterMode::Position => {
+                if self.value < 0 {
+                    panic!("Invalid pointer address: {}", self.value);
+                }
+                computer.get_memory_value(self.value as u64)
+            }
+        }
+    }
+
+    fn set_value(&self, computer: &mut Computer, value: i64) {
+        match self.mode {
+            ParameterMode::Immediate => {
+                panic!("Dst parameter cannot be immediate mode: {}", self.value)
+            }
+            ParameterMode::Position => {
+                if self.value < 0 {
+                    panic!("Invalid pointer address: {}", self.value);
+                }
+                computer.set_memory_value(self.value as u64, value);
+            }
+        }
+    }
+}
+
+pub async fn run_program_with_input(program: &str, input: &str) -> String {
+    let program = parse_input(program);
+    let (string_input, receiver) = StringInput::new(input.to_string());
+    let (mut string_output, sender) = StringOutput::new();
+    let mut computer = Computer::new_with_io(receiver, sender);
+    computer.load_memory(program);
+
+    let input_handle = tokio::spawn(async move {
+        string_input.run().await;
+    });
+    let output_handle = tokio::spawn(async move { string_output.run().await });
+
+    computer.run().await;
+
+    drop(computer);
+    input_handle.abort();
+
+    output_handle.await.unwrap()
 }
