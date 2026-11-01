@@ -1,0 +1,14 @@
+[package]
+name = "rust-2026"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[lib]
+name = "intcode"
+path = "src/lib/intcode/intcode.rs"
+
+[[bin]]
+name = "day-02"
+path = "src/bin/day-02/main.rs"
