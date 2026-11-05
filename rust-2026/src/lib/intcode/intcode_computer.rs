@@ -8,6 +8,7 @@ use crate::{
 pub struct Computer {
     instruction_pointer: u64,
     memory: Vec<i64>,
+    relative_base: u64,
     input: Receiver<i64>,
     output: Sender<i64>,
 }
@@ -19,6 +20,7 @@ impl Computer {
         Computer {
             instruction_pointer: 0,
             memory: vec![],
+            relative_base: 0,
             input,
             output,
         }
@@ -28,6 +30,7 @@ impl Computer {
         Computer {
             instruction_pointer: 0,
             memory: vec![],
+            relative_base: 0,
             input,
             output,
         }
@@ -42,7 +45,7 @@ impl Computer {
     }
 
     pub fn get_memory_value(&self, address: u64) -> i64 {
-        self.memory[address as usize]
+        self.memory.get(address as usize).copied().unwrap_or(0)
     }
 
     pub fn set_memory_value(&mut self, address: u64, value: i64) {
@@ -75,6 +78,10 @@ impl Computer {
             panic!("Instruction pointer cannot be negative")
         }
         self.instruction_pointer = value as u64;
+    }
+
+    fn move_relative_base(&mut self, offset: i64) {
+        self.relative_base = self.relative_base.strict_add_signed(offset)
     }
 
     fn get_instruction(&self) -> Instruction {
@@ -131,6 +138,9 @@ enum Instruction {
         rhs: Parameter,
         dst: Parameter,
     },
+    RelativeBaseOffset {
+        offset: Parameter,
+    },
     Halt,
 }
 
@@ -173,6 +183,9 @@ impl Instruction {
                 lhs: Parameter::parse(instruction, memory[address + 1], 0),
                 rhs: Parameter::parse(instruction, memory[address + 2], 1),
                 dst: Parameter::parse(instruction, memory[address + 3], 2),
+            },
+            9 => Instruction::RelativeBaseOffset {
+                offset: Parameter::parse(instruction, memory[address + 1], 0),
             },
             99 => Instruction::Halt,
             _ => panic!(
@@ -246,6 +259,10 @@ impl Instruction {
                 dst.set_value(computer, value);
                 computer.move_instruction_pointer(4);
             }
+            Instruction::RelativeBaseOffset { offset } => {
+                computer.move_relative_base(offset.get_value(computer));
+                computer.move_instruction_pointer(2);
+            }
             Instruction::Halt => panic!("Cannot execute Halt instruction"),
         }
     }
@@ -254,6 +271,7 @@ impl Instruction {
 enum ParameterMode {
     Position,
     Immediate,
+    Relative,
 }
 
 struct Parameter {
@@ -267,6 +285,7 @@ impl Parameter {
         let mode = match mode_value {
             0 => ParameterMode::Position,
             1 => ParameterMode::Immediate,
+            2 => ParameterMode::Relative,
             _ => panic!(
                 "Invalid parameter mode: instruction: {}, index: {}, mode: {}",
                 instruction, index, mode_value
@@ -284,6 +303,9 @@ impl Parameter {
                 }
                 computer.get_memory_value(self.value as u64)
             }
+            ParameterMode::Relative => {
+                computer.get_memory_value(computer.relative_base.strict_add_signed(self.value))
+            }
         }
     }
 
@@ -297,6 +319,10 @@ impl Parameter {
                     panic!("Invalid pointer address: {}", self.value);
                 }
                 computer.set_memory_value(self.value as u64, value);
+            }
+            ParameterMode::Relative => {
+                computer
+                    .set_memory_value(computer.relative_base.strict_add_signed(self.value), value);
             }
         }
     }
